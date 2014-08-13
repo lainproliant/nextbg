@@ -3,6 +3,7 @@ nextbg
 
 A handy python script for indexing and dynamically switching wallpaper images in Linux.
 
+'''
 Usage: nextbg.py [SET_OPTIONS]/[[DIR_OPTIONS] -d/--dir DIRECTORY]
 
 Cycle through a list of cached image filenames to change the current bg.
@@ -35,3 +36,4 @@ exist, it will be created and initialized with default options.
 `feh --bg-scale %s` is used to set the bg by default, and *.jpg and *.png
 files in the specified directories are scanned.  To add more image file
 patterns or override the bg set command, please edit the config file.
+'''
