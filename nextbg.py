@@ -13,8 +13,8 @@ import random
 import sys
 
 #-------------------------------------------------------------------
-SHORTOPTS = 'hc:d:rnpRs'
-LONGOPTS = ['help', 'config=', 'dir=', 'recursive', 'next', 'prev', 'random', 'same']
+SHORTOPTS = 'hc:d:rnpRsX'
+LONGOPTS = ['help', 'config=', 'dir=', 'recursive', 'next', 'prev', 'random', 'same', 'delete-current']
 
 DEFAULT_CONFIG = {
    'image_file_patterns':     ['*.jpg', '*.png'],
@@ -49,6 +49,8 @@ Cycle through a list of cached image filenames to change the current bg.
   -s, --same               Set the bg at the current offset.  Useful in order
                            to set the bg after login if you want it to stay
                            the same.
+  -X                       Remove the current wallpaper from the index and
+                           delete the file associated with it.
   -h, --help               Show this help text.
 
 The default config file is stored at ~/.nextbg.json.  If -c is specified,
@@ -64,7 +66,7 @@ patterns or override the bg set command, please edit the config file.
 def main(argv):
    # General options.
    config_file = DEFAULT_CONFIG_FILENAME
-   
+
    # Options for directory scanning.
    search_dir = None
    recursive = False
@@ -73,6 +75,7 @@ def main(argv):
    # Options for background setting.
    image_offset = 1
    randomize = False
+   delete_current = False
 
    opts, args = getopt.getopt(argv, SHORTOPTS, LONGOPTS)
 
@@ -80,9 +83,9 @@ def main(argv):
       if opt in ['-h', '--help']:
          print(HELP_TEXT)
          sys.exit(0)
-         
+
       elif opt in ['-c', '--config']:
-         config_file = val          
+         config_file = val
 
       elif opt in ['-d', '--dir']:
          search_dir = val
@@ -104,11 +107,14 @@ def main(argv):
 
       elif opt in ['-R', '--random']:
          randomize = True
-   
+
+      elif opt in ['-X', '--delete-current']:
+         delete_current = True
+
    cfg = load_config(config_file)
 
    if search_dir is not None:
-      filenames = scan_dir(cfg, search_dir, recursive) 
+      filenames = scan_dir(cfg, search_dir, recursive)
 
       if additive:
          cfg['images'].extend(filenames)
@@ -117,16 +123,21 @@ def main(argv):
          cfg['images'] = filenames
 
       cfg['images'] = sorted(set(cfg['images']))
-   
+
    image_file = None
 
-   if randomize:
+   if delete_current:
+      image_file = delete_current_image(cfg)
+
+   elif randomize:
       image_file = random_image(cfg, image_offset)
 
    else:
       image_file = increment_image(cfg, image_offset)
 
-   apply_image(cfg, image_file)
+   if image_file is not None:
+       apply_image(cfg, image_file)
+
    save_config(cfg, config_file)
 
    sys.exit(0)
@@ -135,7 +146,7 @@ def main(argv):
 def apply_image(cfg, image_file):
    command = cfg['bg_set_command'] % image_file
    result = os.system(command)
-   
+
    print('Applying background image: "%s"' % image_file)
    if (result != 0):
       raise RuntimeError('Failed to set bg using command: %s (exited with status %d)' % (
@@ -154,21 +165,41 @@ def increment_image(cfg, image_offset):
 def random_image(cfg, image_offset):
    if len(cfg['images']) == 0:
       raise RuntimeError('No images configured.  Use "nextbg.py --dir [directory]" to scan a directory for image files.')
-   
-   cfg['offset'] = random.randint(0, len(cfg['images']) - 1) 
+
+   cfg['offset'] = random.randint(0, len(cfg['images']) - 1)
    image_file = cfg['images'][cfg['offset']]
    return image_file
 
 #-------------------------------------------------------------------
+def delete_current_image(cfg):
+   if len(cfg['images']) == 0:
+      raise RuntimeError('No images configured.  Use "nextbg.py --dir [directory]" to scan a directory for image files.')
+
+   offset_to_delete = cfg['offset']
+   image_file = cfg['images'][cfg['offset']]
+
+   # Remove the file on disk and the entry from the list
+   # (but only if we could actually delete the file)
+   os.remove(image_file)
+   cfg['images'].pop(cfg['offset'])
+
+   if len(cfg['images']) > 0:
+       # Apply the next image in the list after the one we deleted,
+       return increment_image(cfg, 0)
+   else:
+       print("There are no more images configured.")
+       return None
+
+#-------------------------------------------------------------------
 def scan_dir(cfg, search_dir, recursive):
    filenames = []
-   
+
    if recursive:
       for root, dirnames, files in os.walk(search_dir):
          filtered_files = []
          for pattern in cfg['image_file_patterns']:
             filtered_files.extend(fnmatch.filter(files, pattern))
-         
+
          print("Adding files in %s to bg list" % root)
 
          for filename in filtered_files:
@@ -181,7 +212,7 @@ def scan_dir(cfg, search_dir, recursive):
          filtered_files.extend(fnmatch.filter(files, pattern))
 
       print("Adding files in %s to bg list" % search_dir)
-      
+
       for filename in filtered_files:
          filenames.append(os.path.join(search_dir, filename))
 
@@ -199,7 +230,7 @@ def load_config(config_file):
          save_config(DEFAULT_CONFIG, config_file)
 
       else:
-         raise RuntimeError('No config file found at location "%s"...' % config_file)   
+         raise RuntimeError('No config file found at location "%s"...' % config_file)
 
    with open(full_path(config_file), 'r') as infile:
       return json.load(infile)
