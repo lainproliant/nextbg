@@ -49,7 +49,7 @@ Cycle through a list of cached image filenames to change the current bg.
   -s, --same               Set the bg at the current offset.  Useful in order
                            to set the bg after login if you want it to stay
                            the same.
-  -X                       Remove the current wallpaper from the index and
+  -X, --delete-current     Remove the current wallpaper from the index and
                            delete the file associated with it.
   -h, --help               Show this help text.
 
@@ -203,7 +203,7 @@ def scan_dir(cfg, search_dir, recursive):
          print("Adding files in %s to bg list" % root)
 
          for filename in filtered_files:
-            filenames.append(os.path.join(root, filename))
+            filenames.append(full_path(os.path.join(root, filename)))
 
    else:
       files = os.listdir(search_dir)
@@ -214,7 +214,7 @@ def scan_dir(cfg, search_dir, recursive):
       print("Adding files in %s to bg list" % search_dir)
 
       for filename in filtered_files:
-         filenames.append(os.path.join(search_dir, filename))
+         filenames.append(full_path(os.path.join(search_dir, filename)))
 
    return filenames
 
