@@ -11,16 +11,17 @@ import os
 import pdb
 import random
 import sys
+import re
 
 #-------------------------------------------------------------------
-SHORTOPTS = 'hc:d:rnpRsX'
-LONGOPTS = ['help', 'config=', 'dir=', 'recursive', 'next', 'prev', 'random', 'same', 'delete-current']
+SHORTOPTS = 'hc:d:rnpRsS:X'
+LONGOPTS = ['help', 'config=', 'dir=', 'recursive', 'next', 'prev', 'random', 'same', 'search=', 'delete-current']
 
 DEFAULT_CONFIG = {
-   'image_file_patterns':     ['*.jpg', '*.png'],
-   'images':                  [],
-   'offset':                  0,
-   'bg_set_command':          'feh --bg-scale "%s"'
+    'image_file_patterns':      ['*.jpg', '*.png'],
+    'images':                   [],
+    'offset':                   0,
+    'bg_set_command':           'feh --bg-scale "%s"'
 }
 
 DEFAULT_CONFIG_FILENAME = '~/.nextbg.json'
@@ -45,6 +46,8 @@ Cycle through a list of cached image filenames to change the current bg.
                            be sorted and any duplicates abspaths are culled.
   -n, --next               Set the bg to the next image in the list(default).
   -p, --prev               Set the bg to the prev image in the list.
+  -S, --search             Set the bg to the first image in the list whos
+                           filename matches the given regular expression.
   -R, --random             Set the bg to a random image in the list.
   -s, --same               Set the bg at the current offset.  Useful in order
                            to set the bg after login if you want it to stay
@@ -64,182 +67,206 @@ patterns or override the bg set command, please edit the config file.
 
 #-------------------------------------------------------------------
 def main(argv):
-   # General options.
-   config_file = DEFAULT_CONFIG_FILENAME
+    # General options.
+    config_file = DEFAULT_CONFIG_FILENAME
 
-   # Options for directory scanning.
-   search_dir = None
-   recursive = False
-   additive = False
+    # Options for directory scanning.
+    search_dir = None
+    recursive = False
+    additive = False
 
-   # Options for background setting.
-   image_offset = 1
-   randomize = False
-   delete_current = False
+    # Options for background setting.
+    image_offset = 1
+    randomize = False
+    delete_current = False
+    search_regex = None
 
-   opts, args = getopt.getopt(argv, SHORTOPTS, LONGOPTS)
+    opts, args = getopt.getopt(argv, SHORTOPTS, LONGOPTS)
 
-   for opt, val in opts:
-      if opt in ['-h', '--help']:
-         print(HELP_TEXT)
-         sys.exit(0)
+    for opt, val in opts:
+        if opt in ['-h', '--help']:
+            print(HELP_TEXT)
+            sys.exit(0)
 
-      elif opt in ['-c', '--config']:
-         config_file = val
+        elif opt in ['-c', '--config']:
+            config_file = val
 
-      elif opt in ['-d', '--dir']:
-         search_dir = val
+        elif opt in ['-d', '--dir']:
+            search_dir = val
 
-      elif opt in ['-a', '--add']:
-         additive = True
+        elif opt in ['-a', '--add']:
+            additive = True
 
-      elif opt in ['-n', '--next']:
-         image_offset = 1
+        elif opt in ['-n', '--next']:
+            image_offset = 1
 
-      elif opt in ['-p', '--prev']:
-         image_offset = -1
+        elif opt in ['-S', '--search']:
+            search_regex = val
 
-      elif opt in ['-s', '--same']:
-         image_offset = 0
+        elif opt in ['-p', '--prev']:
+            image_offset = -1
 
-      elif opt in ['-r', '--recursive']:
-         recursive = True
+        elif opt in ['-s', '--same']:
+            image_offset = 0
 
-      elif opt in ['-R', '--random']:
-         randomize = True
+        elif opt in ['-r', '--recursive']:
+            recursive = True
 
-      elif opt in ['-X', '--delete-current']:
-         delete_current = True
+        elif opt in ['-R', '--random']:
+            randomize = True
 
-   cfg = load_config(config_file)
+        elif opt in ['-X', '--delete-current']:
+            delete_current = True
 
-   if search_dir is not None:
-      filenames = scan_dir(cfg, search_dir, recursive)
+    cfg = load_config(config_file)
 
-      if additive:
-         cfg['images'].extend(filenames)
+    if search_dir is not None:
+        filenames = scan_dir(cfg, search_dir, recursive)
 
-      else:
-         cfg['images'] = filenames
+        if additive:
+            cfg['images'].extend(filenames)
 
-      cfg['images'] = sorted(set(cfg['images']))
+        else:
+            cfg['images'] = filenames
 
-   image_file = None
+        cfg['images'] = sorted(set(cfg['images']))
 
-   if delete_current:
-      image_file = delete_current_image(cfg)
+    image_file = None
 
-   elif randomize:
-      image_file = random_image(cfg, image_offset)
+    if delete_current:
+        image_file = delete_current_image(cfg)
 
-   else:
-      image_file = increment_image(cfg, image_offset)
+    if randomize:
+        image_file = random_image(cfg, image_offset)
 
-   if image_file is not None:
-       apply_image(cfg, image_file)
+    elif search_regex is not None:
+        image_file = search_image(cfg, search_regex)
+        if image_file is None:
+            print("No image was found for regex '%s'." % search_regex)
 
-   save_config(cfg, config_file)
+    else:
+        image_file = increment_image(cfg, image_offset)
 
-   sys.exit(0)
+    if image_file is not None:
+         apply_image(cfg, image_file)
+
+    save_config(cfg, config_file)
+
+    sys.exit(0)
 
 #-------------------------------------------------------------------
 def apply_image(cfg, image_file):
-   command = cfg['bg_set_command'] % image_file
-   result = os.system(command)
+    command = cfg['bg_set_command'] % image_file
+    result = os.system(command)
 
-   print('Applying background image: "%s"' % image_file)
-   if (result != 0):
-      raise RuntimeError('Failed to set bg using command: %s (exited with status %d)' % (
-               command, result))
+    print('Applying background image: "%s"' % image_file)
+    if (result != 0):
+        raise RuntimeError('Failed to set bg using command: %s (exited with status %d)' % (
+                    command, result))
 
 #-------------------------------------------------------------------
 def increment_image(cfg, image_offset):
-   if len(cfg['images']) == 0:
-      raise RuntimeError('No images configured.  Use "nextbg.py --dir [directory]" to scan a directory for image files.')
+    if len(cfg['images']) == 0:
+        raise RuntimeError('No images configured.  Use "nextbg.py --dir [directory]" to scan a directory for image files.')
 
-   cfg['offset'] = (cfg['offset'] + image_offset) % len(cfg['images'])
-   image_file = cfg['images'][cfg['offset']]
-   return image_file
+    cfg['offset'] = (cfg['offset'] + image_offset) % len(cfg['images'])
+    image_file = cfg['images'][cfg['offset']]
+    return image_file
 
 #-------------------------------------------------------------------
 def random_image(cfg, image_offset):
-   if len(cfg['images']) == 0:
-      raise RuntimeError('No images configured.  Use "nextbg.py --dir [directory]" to scan a directory for image files.')
+    if len(cfg['images']) == 0:
+        raise RuntimeError('No images configured.  Use "nextbg.py --dir [directory]" to scan a directory for image files.')
 
-   cfg['offset'] = random.randint(0, len(cfg['images']) - 1)
-   image_file = cfg['images'][cfg['offset']]
-   return image_file
+    cfg['offset'] = random.randint(0, len(cfg['images']) - 1)
+    image_file = cfg['images'][cfg['offset']]
+    return image_file
+
+#-------------------------------------------------------------------
+def search_image(cfg, search_regex):
+    regex = re.compile(search_regex)
+    image_offset = 0
+
+    for filename in cfg['images']:
+        if regex.search(filename) is not None:
+            cfg['offset'] = image_offset
+            return filename
+
+        else:
+            image_offset += 1
+
+    return None
 
 #-------------------------------------------------------------------
 def delete_current_image(cfg):
-   if len(cfg['images']) == 0:
-      raise RuntimeError('No images configured.  Use "nextbg.py --dir [directory]" to scan a directory for image files.')
+    if len(cfg['images']) == 0:
+        raise RuntimeError('No images configured.  Use "nextbg.py --dir [directory]" to scan a directory for image files.')
 
-   offset_to_delete = cfg['offset']
-   image_file = cfg['images'][cfg['offset']]
+    offset_to_delete = cfg['offset']
+    image_file = cfg['images'][cfg['offset']]
 
-   # Remove the file on disk and the entry from the list
-   # (but only if we could actually delete the file)
-   os.remove(image_file)
-   cfg['images'].pop(cfg['offset'])
+    # Remove the file on disk and the entry from the list
+    # (but only if we could actually delete the file)
+    os.remove(image_file)
+    cfg['images'].pop(cfg['offset'])
 
-   if len(cfg['images']) > 0:
-       # Apply the next image in the list after the one we deleted,
-       return increment_image(cfg, 0)
-   else:
-       print("There are no more images configured.")
-       return None
+    if len(cfg['images']) > 0:
+         # Apply the next image in the list after the one we deleted,
+         return increment_image(cfg, 0)
+    else:
+         print("There are no more images configured.")
+         return None
 
 #-------------------------------------------------------------------
 def scan_dir(cfg, search_dir, recursive):
-   filenames = []
+    filenames = []
 
-   if recursive:
-      for root, dirnames, files in os.walk(search_dir):
-         filtered_files = []
-         for pattern in cfg['image_file_patterns']:
+    if recursive:
+        for root, dirnames, files in os.walk(search_dir):
+            filtered_files = []
+            for pattern in cfg['image_file_patterns']:
+                filtered_files.extend(fnmatch.filter(files, pattern))
+
+            print("Adding files in %s to bg list" % root)
+
+            for filename in filtered_files:
+                filenames.append(full_path(os.path.join(root, filename)))
+
+    else:
+        files = os.listdir(search_dir)
+        filtered_files = []
+        for pattern in cfg['image_file_patterns']:
             filtered_files.extend(fnmatch.filter(files, pattern))
 
-         print("Adding files in %s to bg list" % root)
+        print("Adding files in %s to bg list" % search_dir)
 
-         for filename in filtered_files:
-            filenames.append(full_path(os.path.join(root, filename)))
+        for filename in filtered_files:
+            filenames.append(full_path(os.path.join(search_dir, filename)))
 
-   else:
-      files = os.listdir(search_dir)
-      filtered_files = []
-      for pattern in cfg['image_file_patterns']:
-         filtered_files.extend(fnmatch.filter(files, pattern))
-
-      print("Adding files in %s to bg list" % search_dir)
-
-      for filename in filtered_files:
-         filenames.append(full_path(os.path.join(search_dir, filename)))
-
-   return filenames
+    return filenames
 
 #-------------------------------------------------------------------
 def full_path(path):
-   return os.path.abspath(os.path.expanduser(path))
+    return os.path.abspath(os.path.expanduser(path))
 
 #-------------------------------------------------------------------
 def load_config(config_file):
-   if not os.path.isfile(full_path(config_file)):
-      if config_file == DEFAULT_CONFIG_FILENAME:
-         print('Default config file not found, creating it at "%s"...' % config_file)
-         save_config(DEFAULT_CONFIG, config_file)
+    if not os.path.isfile(full_path(config_file)):
+        if config_file == DEFAULT_CONFIG_FILENAME:
+            print('Default config file not found, creating it at "%s"...' % config_file)
+            save_config(DEFAULT_CONFIG, config_file)
 
-      else:
-         raise RuntimeError('No config file found at location "%s"...' % config_file)
+        else:
+            raise RuntimeError('No config file found at location "%s"...' % config_file)
 
-   with open(full_path(config_file), 'r') as infile:
-      return json.load(infile)
+    with open(full_path(config_file), 'r') as infile:
+        return json.load(infile)
 
 #-------------------------------------------------------------------
 def save_config(cfg, config_file):
-   with open(full_path(config_file), 'w', encoding = 'utf8') as outfile:
-      json.dump(cfg, outfile, indent = 4)
+    with open(full_path(config_file), 'w', encoding = 'utf8') as outfile:
+        json.dump(cfg, outfile, indent = 4)
 
 #-------------------------------------------------------------------
 if __name__ == '__main__':
-   main(sys.argv[1:])
+    main(sys.argv[1:])
