@@ -14,7 +14,7 @@ import sys
 import re
 
 #-------------------------------------------------------------------
-SHORTOPTS = 'hc:d:rnpRsS:X'
+SHORTOPTS = 'hc:d:rnpRsS:XP'
 LONGOPTS = ['help', 'config=', 'dir=', 'recursive', 'next', 'prev', 'random', 'same', 'search=', 'delete-current']
 
 DEFAULT_CONFIG = {
@@ -55,6 +55,7 @@ Cycle through a list of cached image filenames to change the current bg.
   -X, --delete-current     Remove the current wallpaper from the index and
                            delete the file associated with it.
   -h, --help               Show this help text.
+  -P                       Print the path of the current background image.
 
 The default config file is stored at ~/.nextbg.json.  If -c is specified,
 this will be used as the config file instead.  If the config file does not
@@ -69,6 +70,7 @@ patterns or override the bg set command, please edit the config file.
 def main(argv):
     # General options.
     config_file = DEFAULT_CONFIG_FILENAME
+    print_and_exit = False
 
     # Options for directory scanning.
     search_dir = None
@@ -118,7 +120,15 @@ def main(argv):
         elif opt in ['-X', '--delete-current']:
             delete_current = True
 
+        elif opt in ['-P']:
+            print_and_exit = True
+
     cfg = load_config(config_file)
+
+    if print_and_exit:
+        image_file = increment_image(cfg, 0)
+        print(image_file)
+        sys.exit(0)
 
     if search_dir is not None:
         filenames = scan_dir(cfg, search_dir, recursive)
