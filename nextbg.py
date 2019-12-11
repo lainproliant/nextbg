@@ -1,282 +1,371 @@
 #!/usr/bin/env python
 
-#
+# -------------------------------------------------------------------
 # nextbg.py: Go back and forth between wallpapers.
-#
+# -------------------------------------------------------------------
 
-import fnmatch
-import getopt
+import argparse
 import json
 import os
-import pdb
 import random
+import subprocess
 import sys
-import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List
 
-#-------------------------------------------------------------------
-SHORTOPTS = 'hc:d:rnpRsS:XP'
-LONGOPTS = ['help', 'config=', 'dir=', 'recursive', 'next', 'prev', 'random', 'same', 'search=', 'delete-current']
+# -------------------------------------------------------------------
+DESCRIPTION = """
+Cycle through a list of cached image filenames to change the current X11 root
+background image.
+""".strip()
 
-DEFAULT_CONFIG = {
-    'image_file_patterns':      ['*.jpg', '*.png'],
-    'images':                   [],
-    'offset':                   0,
-    'bg_set_command':           'feh --bg-scale "%s"'
-}
+HELP_CONFIG = """
+Specify the file to interact with for configuration options.  These include the
+background set commands, current offset, image file patterns, and current list
+of image files.  This file will be overwritten when the background is updated
+or a directory is scanned, and will be created if it doesn't already exist.
+""".strip()
 
-DEFAULT_CONFIG_FILENAME = '~/.nextbg.json'
+HELP_SCAN = """
+Enables scanning mode.  By default, the current directory will be scanned and
+any images found will replace the current image index, unless `-a` is specified,
+in which case they will be appended to the current list.
+""".strip()
 
-HELP_TEXT = '''
-Usage: nextbg.py [SET_OPTIONS]/[[DIR_OPTIONS] -d/--dir DIRECTORY]
+HELP_DIR = """
+Specifies a directory to be scanned for images.  By default, this is the
+current directory.
+""".strip()
 
-Cycle through a list of cached image filenames to change the current bg.
+HELP_RECURSIVE = """
+Only valid if `-s/--scan` is specified.  Causes all directories under the
+specified directory to be scanned recursively for images.
+""".strip()
 
-  -c, --config=FILE        Specify the file to interact with for configuration
-                           options. These include the bg set command, current
-                           offset, image file patterns, and current list of
-                           image files.  This file will be overwritten when the
-                           background is updated or a directory is scanned.
-  -d, --dir=DIR            Specifies a directory to be scanned.
-  -r, --recursive          Only valid if -d is specified. Causees all
-                           directories under the specified directory to be
-                           scanned as well.
-  -a, --add                Only valid of -d is specified. Causes the results of
-                           this directory scan to be added to any previously
-                           scanned directories.  All absolute filenames will
-                           be sorted and any duplicates abspaths are culled.
-  -n, --next               Set the bg to the next image in the list(default).
-  -p, --prev               Set the bg to the prev image in the list.
-  -S, --search             Set the bg to the first image in the list whos
-                           filename matches the given regular expression.
-  -R, --random             Set the bg to a random image in the list.
-  -s, --same               Set the bg at the current offset.  Useful in order
-                           to set the bg after login if you want it to stay
-                           the same.
-  -X, --delete-current     Remove the current wallpaper from the index and
-                           delete the file associated with it.
-  -h, --help               Show this help text.
-  -P                       Print the path of the current background image.
+HELP_APPEND = """
+Only valid if `-s/--scan` is specified.  Causes the results of this directory
+scan to be added to any previously scanned directories.  All absolute filenames
+will be sorted and any duplicate abspaths are culled.
+""".strip()
 
-The default config file is stored at ~/.nextbg.json.  If -c is specified,
-this will be used as the config file instead.  If the config file does not
-exist, it will be created and initialized with default options.
+HELP_NEXT = """
+Set the background to the next image in the list.  This is the default action
+if no parameters are specfied.
+""".strip()
 
-`feh --bg-scale %s` is used to set the bg by default, and *.jpg and *.png
-files in the specified directories are scanned.  To add more image file
-patterns or override the bg set command, please edit the config file.
-'''.strip();
+HELP_PREV = """
+Set the background to the previous image in the list.
+""".strip()
 
-#-------------------------------------------------------------------
-def main(argv):
-    # General options.
-    config_file = DEFAULT_CONFIG_FILENAME
-    print_and_exit = False
+HELP_RANDOM = """
+Set the background to a random image in the list.
+""".strip()
 
-    # Options for directory scanning.
-    search_dir = None
+HELP_SET = """
+Set the background to the current background.  You should call this in your
+`~.xinitrc` or the like to set the background when you login to your X session.
+""".strip()
+
+HELP_DELETE = """
+Remove the current wallpaper from the list.  Does not delete the file on disk.
+""".strip()
+
+HELP_PRINT = """
+Print the path of the current background image.  Useful if you want to use your
+background image in other applications or scripts.
+""".strip()
+
+EPILOG = """
+By default, the config file is stored at `~/.nextbg.json`.  If `-c` is
+specified, this will be used as the config file instead.  If the config file
+does not exist, it will be created and initialized with default options.
+
+`feh` is used to set the background by default, and `*.jpg` and `*.png` files
+in the specified directories are scanned.  To add more image file patterns or
+override the background setting command, edit the`image_file_patterns` and
+`bg_set_command` fields in the config JSON respectively.
+"""
+
+
+# -------------------------------------------------------------------
+class CommandError(Exception):
+    pass
+
+
+# -------------------------------------------------------------------
+@dataclass
+class DecoratorMap:
+    map: Dict[str, Any] = field(default_factory=dict)
+
+    def __call__(self, key):
+        def impl(value):
+            self.map[key] = value
+            return value
+        return impl
+
+    def get(self, key):
+        if key not in self.map:
+            raise ValueError(f"Function not found for '{key}'.")
+        return self.map[key]
+
+
+# -------------------------------------------------------------------
+mode = DecoratorMap()
+
+
+# -------------------------------------------------------------------
+@dataclass
+class Config:
+    modes: List[str] = field(default_factory=list)
+    index: List[str] = field(default_factory=list)
+    mode = "next"
+    bg_set_command = ['feh', '--bg-fill', '<image>']
+    image_file_patterns = ["*.png", "*.jpg"]
+    config_filename = "~/.nextbg.json"
+    offset = 0
     recursive = False
-    additive = False
+    append = False
+    dir = '.'
 
-    # Options for background setting.
-    image_offset = 1
-    randomize = False
-    delete_current = False
-    search_regex = None
+    @staticmethod
+    def get_arg_parser():
+        parser = argparse.ArgumentParser(description=DESCRIPTION, epilog=EPILOG)
 
-    opts, args = getopt.getopt(argv, SHORTOPTS, LONGOPTS)
+        parser.add_argument("-c", "--config", dest="config_filename",
+                            help=HELP_CONFIG)
+        parser.add_argument("-s", "--scan", action="append_const",
+                            dest="modes", const="scan", help=HELP_APPEND)
+        parser.add_argument("-d", "--dir", default=os.getcwd(), help=HELP_DIR)
+        parser.add_argument("-r", "--recursive", action="store_true",
+                            help=HELP_RECURSIVE)
+        parser.add_argument("-a", "--append", action="store_true",
+                            help=HELP_APPEND)
+        parser.add_argument("-n", "--next", action="append_const",
+                            dest="modes", const="next", help=HELP_NEXT)
+        parser.add_argument("-p", "--prev", action="append_const",
+                            dest="modes", const="prev", help=HELP_PREV)
+        parser.add_argument("-R", "--random", action="append_const",
+                            dest="modes", const="random", help=HELP_PREV)
+        parser.add_argument("-S", "--set", action="append_const", dest="modes",
+                            const="set", help=HELP_SET)
+        parser.add_argument("-X", "--delete", action="append_const",
+                            dest="modes",
+                            const="delete", help=HELP_DELETE)
+        parser.add_argument("-P", "--print", action="append_const",
+                            dest="modes", const="print", help=HELP_PRINT)
+        return parser
 
-    for opt, val in opts:
-        if opt in ['-h', '--help']:
-            print(HELP_TEXT)
-            sys.exit(0)
+    @staticmethod
+    def setup():
+        return Config().parse_args().load()
 
-        elif opt in ['-c', '--config']:
-            config_file = val
+    def parse_args(self):
+        parser = self.get_arg_parser()
+        parser.parse_args(namespace=self)
 
-        elif opt in ['-d', '--dir']:
-            search_dir = val
+        if self.modes:
+            if len(self.modes) > 1:
+                raise CommandError(f"Multiple modes specified: '{repr(self.modes)}'. "
+                                   "Please specify only one mode.")
+            self.mode = self.modes[0]
 
-        elif opt in ['-a', '--add']:
-            additive = True
+        return self
 
-        elif opt in ['-n', '--next']:
-            image_offset = 1
+    def load(self):
+        config_path = Path(self.config_filename).expanduser()
 
-        elif opt in ['-S', '--search']:
-            search_regex = val
+        if not config_path.exists():
+            # If config file doesn't exist, make a new one!
+            print(f"Config file {self.config_filename} doesn't exist, creating it with defaults.")
+            self.save()
+            return self
 
-        elif opt in ['-p', '--prev']:
-            image_offset = -1
+        with open(str(config_path), "rt") as infile:
+            config_json = json.load(infile)
 
-        elif opt in ['-s', '--same']:
-            image_offset = 0
+        self.index = config_json['index']
+        self.bg_set_command = config_json['bg_set_command']
+        self.image_file_patterns = config_json['image_file_patterns']
+        self.offset = config_json['offset']
+        return self
 
-        elif opt in ['-r', '--recursive']:
-            recursive = True
+    def save(self):
+        config_path = Path(self.config_filename).expanduser()
 
-        elif opt in ['-R', '--random']:
-            randomize = True
+        config_json = {
+            'index': self.index,
+            'bg_set_command': self.bg_set_command,
+            'image_file_patterns': self.image_file_patterns,
+            'offset': self.offset
+        }
 
-        elif opt in ['-X', '--delete-current']:
-            delete_current = True
+        with open(str(config_path), 'wt') as outfile:
+            json.dump(config_json, outfile, indent=4)
 
-        elif opt in ['-P']:
-            print_and_exit = True
+        print(f"Configuration saved to '{self.config_filename}'.")
+        return self
 
-    cfg = load_config(config_file)
+    def _check_has_index(self):
+        if not self.index:
+            raise CommandError("No index found.  Add some images or directories to get started.")
 
-    if print_and_exit:
-        image_file = increment_image(cfg, 0)
-        print(image_file)
-        sys.exit(0)
+    def get_image(self):
+        """Gets the image at the current offset in the list."""
+        self._check_has_index()
 
-    if search_dir is not None:
-        filenames = scan_dir(cfg, search_dir, recursive)
+        if self.offset not in range(0, len(self.index)):
+            self.offset = 0
 
-        if additive:
-            cfg['images'].extend(filenames)
+        return Path(self.index[self.offset])
 
+    def next_offset(self):
+        """Moves the offset forward by one."""
+        self._check_has_index()
+
+        self.offset += 1
+        if self.offset not in range(0, len(self.index)):
+            self.offset = 0
+        self.save()
+
+    def prev_offset(self):
+        """Moves the offset backwards by one."""
+        self._check_has_index()
+
+        self.offset -= 1
+        if self.offset < 0:
+            self.offset = len(self.index) - 1
+        self.save()
+
+    def random_offset(self):
+        """Sets the offset to a random location in the image index."""
+        self._check_has_index()
+        self.offset = random.randint(0, len(self.index) - 1)
+        self.save()
+
+    def pop_offset(self):
+        """Pops the item at the offset off of the list."""
+        self._check_has_index()
+
+        if len(self.index) == 1:
+            raise CommandError("Refusing to delete the last item from the image index.")
+
+        self.index.pop(self.offset)
+        self.offset -= 1
+        print(f"'{self.get_image()}' removed from index.")
+        self.save()
+
+    def set_index(self, filenames):
+        """Update the index to contain the given list of filenames."""
+        self.index = [str(f) for f in filenames]
+        self.offset = 0
+        if len(filenames) == 1:
+            print("Index set with 1 image.")
         else:
-            cfg['images'] = filenames
+            print(f"Index set with {len(filenames)} images.")
 
-        cfg['images'] = sorted(set(cfg['images']))
+        self.save()
 
-    image_file = None
-
-    if delete_current:
-        image_file = delete_current_image(cfg)
-
-    if randomize:
-        image_file = random_image(cfg, image_offset)
-
-    elif search_regex is not None:
-        image_file = search_image(cfg, search_regex)
-        if image_file is None:
-            print("No image was found for regex '%s'." % search_regex)
-
-    else:
-        image_file = increment_image(cfg, image_offset)
-
-    if image_file is not None:
-         apply_image(cfg, image_file)
-
-    save_config(cfg, config_file)
-
-    sys.exit(0)
-
-#-------------------------------------------------------------------
-def apply_image(cfg, image_file):
-    command = cfg['bg_set_command'] % image_file
-    result = os.system(command)
-
-    print('Applying background image: "%s"' % image_file)
-    if (result != 0):
-        raise RuntimeError('Failed to set bg using command: %s (exited with status %d)' % (
-                    command, result))
-
-#-------------------------------------------------------------------
-def increment_image(cfg, image_offset):
-    if len(cfg['images']) == 0:
-        raise RuntimeError('No images configured.  Use "nextbg.py --dir [directory]" to scan a directory for image files.')
-
-    cfg['offset'] = (cfg['offset'] + image_offset) % len(cfg['images'])
-    image_file = cfg['images'][cfg['offset']]
-    return image_file
-
-#-------------------------------------------------------------------
-def random_image(cfg, image_offset):
-    if len(cfg['images']) == 0:
-        raise RuntimeError('No images configured.  Use "nextbg.py --dir [directory]" to scan a directory for image files.')
-
-    cfg['offset'] = random.randint(0, len(cfg['images']) - 1)
-    image_file = cfg['images'][cfg['offset']]
-    return image_file
-
-#-------------------------------------------------------------------
-def search_image(cfg, search_regex):
-    regex = re.compile(search_regex)
-    image_offset = 0
-
-    for filename in cfg['images']:
-        if regex.search(filename) is not None:
-            cfg['offset'] = image_offset
-            return filename
-
+    def update_index(self, filenames):
+        """Append the given items to the index."""
+        self.index.extend([str(f) for f in filenames])
+        if len(filenames) == 1:
+            print("Index updated with 1 image.")
         else:
-            image_offset += 1
+            print(f"Index updated with {len(self.index)} images.")
 
-    return None
+        if len(self.index) == 1:
+            print("Index now contains 1 image.")
+        else:
+            print(f"Index now contains {len(self.index)} images.")
+        self.save()
 
-#-------------------------------------------------------------------
-def delete_current_image(cfg):
-    if len(cfg['images']) == 0:
-        raise RuntimeError('No images configured.  Use "nextbg.py --dir [directory]" to scan a directory for image files.')
 
-    offset_to_delete = cfg['offset']
-    image_file = cfg['images'][cfg['offset']]
+# -------------------------------------------------------------------
+def main():
+    config = Config.setup()
 
-    # Remove the file on disk and the entry from the list
-    # (but only if we could actually delete the file)
-    os.remove(image_file)
-    cfg['images'].pop(cfg['offset'])
+    try:
+        mode.get(config.mode)(config)
+        return 0
+    except CommandError as e:
+        print(f'ERROR: {e}')
+        return 1
 
-    if len(cfg['images']) > 0:
-         # Apply the next image in the list after the one we deleted,
-         return increment_image(cfg, 0)
-    else:
-         print("There are no more images configured.")
-         return None
 
-#-------------------------------------------------------------------
-def scan_dir(cfg, search_dir, recursive):
+# -------------------------------------------------------------------
+@mode('scan')
+def scan_directory(config: Config):
     filenames = []
+    directory = Path(config.dir).expanduser()
 
-    if recursive:
-        for root, dirnames, files in os.walk(search_dir):
-            filtered_files = []
-            for pattern in cfg['image_file_patterns']:
-                filtered_files.extend(fnmatch.filter(files, pattern))
+    print(f"Scanning '{config.dir} for image files...'")
 
-            print("Adding files in %s to bg list" % root)
-
-            for filename in filtered_files:
-                filenames.append(full_path(os.path.join(root, filename)))
-
+    if config.recursive:
+        for pattern in config.image_file_patterns:
+            filenames.extend(list(directory.rglob(pattern)))
     else:
-        files = os.listdir(search_dir)
-        filtered_files = []
-        for pattern in cfg['image_file_patterns']:
-            filtered_files.extend(fnmatch.filter(files, pattern))
+        for pattern in config.image_file_patterns:
+            filenames.extend(list(directory.glob(pattern)))
 
-        print("Adding files in %s to bg list" % search_dir)
+    if not filenames:
+        raise CommandError(f"No images found in '{config.dir}'.")
 
-        for filename in filtered_files:
-            filenames.append(full_path(os.path.join(search_dir, filename)))
+    if config.append:
+        config.update_index(filenames)
+    else:
+        config.set_index(filenames)
 
-    return filenames
+    mode.get('set')(config)
 
-#-------------------------------------------------------------------
-def full_path(path):
-    return os.path.abspath(os.path.expanduser(path))
 
-#-------------------------------------------------------------------
-def load_config(config_file):
-    if not os.path.isfile(full_path(config_file)):
-        if config_file == DEFAULT_CONFIG_FILENAME:
-            print('Default config file not found, creating it at "%s"...' % config_file)
-            save_config(DEFAULT_CONFIG, config_file)
+# -------------------------------------------------------------------
+@mode('print')
+def print_filename(config: Config):
+    image_file = config.get_image()
+    print(str(image_file))
 
-        else:
-            raise RuntimeError('No config file found at location "%s"...' % config_file)
 
-    with open(full_path(config_file), 'r') as infile:
-        return json.load(infile)
+# -------------------------------------------------------------------
+@mode('next')
+def next_image(config: Config):
+    config.next_offset()
+    mode.get('set')(config)
 
-#-------------------------------------------------------------------
-def save_config(cfg, config_file):
-    with open(full_path(config_file), 'w', encoding = 'utf8') as outfile:
-        json.dump(cfg, outfile, indent = 4)
 
-#-------------------------------------------------------------------
-if __name__ == '__main__':
-    main(sys.argv[1:])
+# -------------------------------------------------------------------
+@mode('prev')
+def prev_image(config: Config):
+    config.prev_offset()
+    mode.get('set')(config)
+
+
+# -------------------------------------------------------------------
+@mode('random')
+def random_image(config: Config):
+    config.random_offset()
+    mode.get('set')(config)
+
+
+# -------------------------------------------------------------------
+@mode('set')
+def set_background(config: Config):
+    image = config.get_image()
+    cmd = [image if s == '<image>' else s for s in config.bg_set_command]
+    try:
+        subprocess.check_call(cmd)
+        print(f"Set background to '{str(image)}'.")
+    except Exception:
+        raise CommandError(f"Background setting command failed.")
+
+
+# -------------------------------------------------------------------
+@mode('delete')
+def delete_from_index(config: Config):
+    config.pop_offset()
+    mode.get('set')(config)
+
+
+# -------------------------------------------------------------------
+if __name__ == "__main__":
+    sys.exit(main())
