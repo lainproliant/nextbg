@@ -12,7 +12,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 # -------------------------------------------------------------------
 DESCRIPTION = """
@@ -76,6 +76,11 @@ Print the path of the current background image.  Useful if you want to use your
 background image in other applications or scripts.
 """.strip()
 
+HELP_PATH = """
+For scanning, this is the path to be scanned.  When setting the background, this
+is the image that is set and added to the index if it is not already there.
+""".strip()
+
 EPILOG = """
 By default, the config file is stored at `~/.nextbg.json`.  If `-c` is
 specified, this will be used as the config file instead.  If the config file
@@ -115,18 +120,28 @@ mode = DecoratorMap()
 
 
 # -------------------------------------------------------------------
+def dedup(values: Iterable[Any]):
+    value_set: Set[Any] = set()
+
+    for value in values:
+        if value not in value_set:
+            value_set.add(value)
+            yield value
+
+
+# -------------------------------------------------------------------
 @dataclass
 class Config:
     modes: List[str] = field(default_factory=list)
     index: List[str] = field(default_factory=list)
-    mode = "next"
+    mode = "next-or-set"
     bg_set_command = ['feh', '--bg-fill', '<image>']
     image_file_patterns = ["*.png", "*.jpg"]
     config_filename = "~/.nextbg.json"
     offset = 0
     recursive = False
     append = False
-    dir = '.'
+    path: Optional[str] = None
 
     @staticmethod
     def get_arg_parser():
@@ -136,7 +151,6 @@ class Config:
                             help=HELP_CONFIG)
         parser.add_argument("-s", "--scan", action="append_const",
                             dest="modes", const="scan", help=HELP_APPEND)
-        parser.add_argument("-d", "--dir", default=os.getcwd(), help=HELP_DIR)
         parser.add_argument("-r", "--recursive", action="store_true",
                             help=HELP_RECURSIVE)
         parser.add_argument("-a", "--append", action="store_true",
@@ -150,10 +164,10 @@ class Config:
         parser.add_argument("-S", "--set", action="append_const", dest="modes",
                             const="set", help=HELP_SET)
         parser.add_argument("-X", "--delete", action="append_const",
-                            dest="modes",
-                            const="delete", help=HELP_DELETE)
+                            dest="modes", const="delete", help=HELP_DELETE)
         parser.add_argument("-P", "--print", action="append_const",
                             dest="modes", const="print", help=HELP_PRINT)
+        parser.add_argument("path", metavar="PATH", nargs="?", help=HELP_PATH)
         return parser
 
     @staticmethod
@@ -219,6 +233,21 @@ class Config:
 
         return Path(self.index[self.offset])
 
+    def set_image(self, image):
+        image_path = Path(image)
+        if not image_path.exists():
+            raise CommandError('The specified path does not exist.')
+        if not image_path.is_file():
+            raise CommandError('The specified path is not a file.')
+
+        image = str(image_path)
+        try:
+            self.offset = self.index.index(image)
+            self.save()
+        except ValueError:
+            self.index.insert(self.offset + 1, image)
+            self.next_offset()
+
     def next_offset(self):
         """Moves the offset forward by one."""
         self._check_has_index()
@@ -257,22 +286,35 @@ class Config:
 
     def set_index(self, filenames):
         """Update the index to contain the given list of filenames."""
-        self.index = [str(f) for f in filenames]
+        self.index = [str(f) for f in dedup(filenames)]
         self.offset = 0
-        if len(filenames) == 1:
+        if len(self.index) == 1:
             print("Index set with 1 image.")
         else:
-            print(f"Index set with {len(filenames)} images.")
+            print(f"Index set with {len(self.index)} images.")
 
         self.save()
 
     def update_index(self, filenames):
         """Append the given items to the index."""
+        filenames = list(dedup(str(f) for f in filenames))
+        old_len = len(self.index)
         self.index.extend([str(f) for f in filenames])
-        if len(filenames) == 1:
-            print("Index updated with 1 image.")
+        self.index = list(dedup(self.index))
+        num_added = len(self.index) - old_len
+        num_not_added = len(filenames) - num_added
+
+        if num_added == 0:
+            print("No new images were added to the index.")
+        elif num_added == 1:
+            print("One new image was added to the index.")
         else:
-            print(f"Index updated with {len(self.index)} images.")
+            print(f"{num_added} images were added to the index.")
+
+        if num_not_added == 1:
+            print("1 image was already in the index.")
+        elif num_not_added > 1:
+            print(f"{num_not_added} images were already in the index.")
 
         if len(self.index) == 1:
             print("Index now contains 1 image.")
@@ -290,16 +332,20 @@ def main():
         return 0
     except CommandError as e:
         print(f'ERROR: {e}')
-        return 1
+        raise e
+        #return 1
 
 
 # -------------------------------------------------------------------
 @mode('scan')
 def scan_directory(config: Config):
     filenames = []
-    directory = Path(config.dir).expanduser()
+    if not config.path:
+        config.path = os.getcwd()
 
-    print(f"Scanning '{config.dir} for image files...'")
+    directory = Path(config.path).expanduser()
+
+    print(f"Scanning '{config.path} for image files...'")
 
     if config.recursive:
         for pattern in config.image_file_patterns:
@@ -309,7 +355,7 @@ def scan_directory(config: Config):
             filenames.extend(list(directory.glob(pattern)))
 
     if not filenames:
-        raise CommandError(f"No images found in '{config.dir}'.")
+        raise CommandError(f"No images found in '{config.path}'.")
 
     if config.append:
         config.update_index(filenames)
@@ -364,6 +410,16 @@ def set_background(config: Config):
 def delete_from_index(config: Config):
     config.pop_offset()
     mode.get('set')(config)
+
+
+# -------------------------------------------------------------------
+@mode('next-or-set')
+def next_image_or_set_image(config: Config):
+    if not config.path:
+        mode.get('next')(config)
+    else:
+        config.set_image(config.path)
+        mode.get('set')(config)
 
 
 # -------------------------------------------------------------------
