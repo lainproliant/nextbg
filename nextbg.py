@@ -150,7 +150,7 @@ class Config:
         parser.add_argument("-c", "--config", dest="config_filename",
                             help=HELP_CONFIG)
         parser.add_argument("-s", "--scan", action="append_const",
-                            dest="modes", const="scan", help=HELP_APPEND)
+                            dest="modes", const="scan", help=HELP_SCAN)
         parser.add_argument("-r", "--recursive", action="store_true",
                             help=HELP_RECURSIVE)
         parser.add_argument("-a", "--append", action="store_true",
