@@ -343,7 +343,7 @@ def scan_directory(config: Config):
     if not config.path:
         config.path = os.getcwd()
 
-    directory = Path(config.path).expanduser()
+    directory = Path(config.path).expanduser().absolute()
 
     print(f"Scanning '{config.path} for image files...'")
 
